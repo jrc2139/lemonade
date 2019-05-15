@@ -3,22 +3,28 @@ package server
 import (
 	"encoding/base64"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 
 	"github.com/atotto/clipboard"
 	log "github.com/inconshreveable/log15"
 	"github.com/lemonade-command/lemonade/lemon"
+	"github.com/lemonade-command/lemonade/models"
 	"github.com/pocke/go-iprange"
 	"github.com/skratchdot/open-golang/open"
+	"github.com/vmihailenco/msgpack"
 )
+
+const MSGPACK = "application/x-msgpack"
 
 var logger log.Logger
 var lineEnding string
 var ra *iprange.Range
+var port int
+var path = "./files"
 
 func handleCopy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -28,12 +34,37 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 
 	// Read body
 	b, err := ioutil.ReadAll(r.Body)
-	defer r.Body.Close()
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	clipboard.WriteAll(lemon.ConvertLineEnding(string(b), lineEnding))
+	defer r.Body.Close()
+
+	// type messsage struct {
+	// Value string
+	// }
+
+	// var m *message
+
+	var m *models.Message
+
+	if err := msgpack.Unmarshal(b, m); err != nil {
+		logger.Error("error unmarshalling msgpack.", "err", err.Error())
+		http.Error(w, "error unmarshalling msgpack.", http.StatusInternalServerError)
+
+		return
+	}
+
+	// text := lemon.ConvertLineEnding(string(b), lineEnding)
+	text := lemon.ConvertLineEnding(m.Text, lineEnding)
+	logger.Debug("Copy:", "text", text)
+
+	if err := clipboard.WriteAll(text); err != nil {
+		logger.Error("error writing to clipboard.", "err", err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+
+		return
+	}
 }
 
 func handlePaste(w http.ResponseWriter, r *http.Request) {
@@ -43,9 +74,32 @@ func handlePaste(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t, err := clipboard.ReadAll()
-	if err == nil {
-		io.WriteString(w, t)
+	if err != nil {
+		logger.Error("error reading from clipboard.", "err", err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+
+		return
 	}
+
+	w.Header().Set("content-type", MSGPACK)
+
+	w.WriteHeader(http.StatusOK)
+
+	b, err := msgpack.Marshal(&models.Message{Text: t})
+	if err != nil {
+		logger.Error("error marshalling msgpack.", "err", err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
+	if _, err := w.Write(b); err != nil {
+		logger.Error("error writing resp", "err", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
 	logger.Debug("Paste: ", "text", t)
 }
 
@@ -56,6 +110,9 @@ func translateLoopbackIP(uri string, remoteIP string) string {
 	}
 
 	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		return err.Error()
+	}
 
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
@@ -99,6 +156,39 @@ func handleOpen(w http.ResponseWriter, r *http.Request) {
 	open.Run(uri)
 }
 
+func handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Upload only support post", 404)
+		return
+	}
+
+	r.ParseMultipartForm(10 << 20)
+	file, handler, err := r.FormFile("uploadFile")
+	if err != nil {
+		http.Error(w, "Error Retrieving the File", 500)
+		logger.Error("Error Retrieving the File", "err", err)
+		return
+	}
+	defer file.Close()
+
+	fileBytes, err := ioutil.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Error Read the File", 500)
+		logger.Error("Error Read the File", "err", err)
+		return
+	}
+
+	ioutil.WriteFile(path+"/"+handler.Filename, fileBytes, os.ModePerm)
+
+	q := r.URL.Query()
+	isOpen := q.Get("open")
+	if isOpen == "true" {
+		uri := fmt.Sprintf("http://127.0.0.1:%d/files/%s", port, handler.Filename)
+		logger.Info("Open: ", "uri", uri)
+		open.Run(uri)
+	}
+}
+
 func middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodPost {
@@ -123,6 +213,7 @@ func middleware(next http.Handler) http.Handler {
 func Serve(c *lemon.CLI, _logger log.Logger) error {
 	logger = _logger
 	lineEnding = c.LineEnding
+	port = c.Port
 
 	var err error
 	ra, err = iprange.New(c.Allow)
@@ -131,9 +222,12 @@ func Serve(c *lemon.CLI, _logger log.Logger) error {
 		return err
 	}
 
+	os.MkdirAll(path, os.ModePerm)
+	http.Handle("/files/", http.StripPrefix("/files/", http.FileServer(http.Dir(path))))
 	http.Handle("/copy", middleware(http.HandlerFunc(handleCopy)))
 	http.Handle("/paste", middleware(http.HandlerFunc(handlePaste)))
 	http.Handle("/open", middleware(http.HandlerFunc(handleOpen)))
+	http.Handle("/upload", middleware(http.HandlerFunc(handleUpload)))
 	err = http.ListenAndServe(fmt.Sprintf(":%d", c.Port), nil)
 	if err != nil {
 		return err
