@@ -15,7 +15,7 @@ import (
 	"github.com/lemonade-command/lemonade/models"
 	"github.com/pocke/go-iprange"
 	"github.com/skratchdot/open-golang/open"
-	"github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 const MSGPACK = "application/x-msgpack"
@@ -46,9 +46,9 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 
 	// var m *message
 
-	var m *models.Message
+	var m models.Message
 
-	if err := msgpack.Unmarshal(b, m); err != nil {
+	if err := msgpack.Unmarshal(b, &m); err != nil {
 		logger.Error("error unmarshalling msgpack.", "err", err.Error())
 		http.Error(w, "error unmarshalling msgpack.", http.StatusInternalServerError)
 

@@ -15,7 +15,7 @@ import (
 	log "github.com/inconshreveable/log15"
 	"github.com/lemonade-command/lemonade/lemon"
 	"github.com/lemonade-command/lemonade/models"
-	"github.com/vmihailenco/msgpack"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type client struct {
@@ -81,9 +81,9 @@ func (c *client) Paste() (string, error) {
 		return "", err
 	}
 
-	var m *models.Message
+	var m models.Message
 
-	if err := msgpack.Unmarshal(body, m); err != nil {
+	if err := msgpack.Unmarshal(body, &m); err != nil {
 		c.logger.Error("error unmarshalling msgpack.", "err", err.Error())
 	}
 
